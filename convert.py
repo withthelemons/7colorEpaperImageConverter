@@ -19,19 +19,19 @@ IMAGE_PROCESSOR = ImageProcessor()
 
 # available palettes
 OG_BW_PALETTE = (0, 0, 0, 255, 255, 255)
-LIMITED_BW_PALETTE = (16, 16, 16, 235, 235, 235)
+LIMITED_BW_PALETTE = (16, 16, 16, 240, 240, 240)
 OLD_SATURATED_PALETTE = (57, 48, 57, 255, 255, 255, 58, 91, 70, 61, 59, 94, 156, 72, 75, 208, 190, 71, 177, 106, 73)
-SATURATED_PALETTE_TUNED_FOR_25 = (57, 48, 57, 255, 255, 255, 58, 91, 70, 25, 70, 100, 156, 72, 75, 208, 190, 71, 177, 106, 73)
-SATURATED_PALETTE_TUNED_FOR_50 = (57, 48, 57, 255, 255, 255, 58, 91, 70, 39, 66, 98, 156, 72, 75, 208, 190, 71, 177, 106, 73)
+SAT_PAL_TUNED_FOR_25 = (57, 48, 57, 255, 255, 255, 58, 91, 70, 25, 70, 100, 156, 72, 75, 208, 190, 71, 177, 106, 73)
+SAT_PAL_TUNED_FOR_50 = (57, 48, 57, 255, 255, 255, 58, 91, 70, 39, 66, 98, 156, 72, 75, 208, 190, 71, 177, 106, 73)
 FROM_PHOTO_PALETTE = (42, 45, 63, 227, 227, 227, 77, 111, 86, 57, 69, 107, 168, 85, 81, 222, 206, 95, 195, 104, 86)
 DATASHEET_PALETTE = (50, 39, 56, 173, 173, 173, 45, 101, 67, 63, 62, 105, 144, 61, 63, 167, 161, 72, 157, 83, 65)
-ALMOST_DATASHEET_PALETTE = (0, 0, 0, 255, 255, 255, 45, 101, 67, 63, 62, 105, 144, 61, 63, 167, 161, 72, 157, 83, 65)
+ALMOST_DATASHEET_PALETTE = (0, 0, 0, 235, 235, 235, 45, 101, 67, 63, 62, 105, 144, 61, 63, 167, 161, 72, 157, 83, 65)
 OG_PALETTE = (0, 0, 0, 255, 255, 255, 0, 255, 0, 0, 0, 255, 255, 0, 0, 255, 255, 0, 255, 128, 0)
 
 # selected palettes
-BW_PALETTE = OG_BW_PALETTE
-SATURATED_PALETTE = ALMOST_DATASHEET_PALETTE
-
+BW_PALETTE = LIMITED_BW_PALETTE
+SATURATED_PALETTE = FROM_PHOTO_PALETTE
+PALETTE_BLEND_RATIO = 1 / 3
 
 def split_palette(palette: Collection[int]) -> list[Collection[int]]:
     return [palette[x : x + 3] for x in range(0, len(palette), 3)]
@@ -45,6 +45,9 @@ def blend_palette(saturation: float) -> list[int]:
         rd, gd, bd = [c * (1 - saturation) for c in split_palette(OG_PALETTE)[i]]
         palette.extend((round(rs + rd), round(gs + gd), round(bs + bd)))
     return palette
+
+
+print(blend_palette(PALETTE_BLEND_RATIO))
 
 
 def get_target_size(
@@ -69,8 +72,7 @@ def convert(
     display_mode: Literal["fit", "pad"],
     bw: bool,
     output_dir: Path,
-    palette_blend_ratio: float,
-    use_km: bool
+    use_km: bool,
 ) -> None:
     use_km = use_km if not bw else False
     input_image = Image.open(input_filename)
@@ -97,7 +99,7 @@ def convert(
         if bw:
             palette = BW_PALETTE
         else:
-            palette = blend_palette(palette_blend_ratio)
+            palette = blend_palette(PALETTE_BLEND_RATIO)
         pal_image.putpalette(palette)
         quantized_image = resized_image.quantize(palette=pal_image)
 
@@ -108,23 +110,20 @@ def convert(
     elif bw:
         extra_string = "_bw"
     else:
-        extra_string = f"_{int(palette_blend_ratio * 100)}"
+        extra_string = f"_{int(PALETTE_BLEND_RATIO * 100)}"
     image_name = f"{input_filename.stem}_{display_mode}{extra_string}_converted.bmp"
     output_filename = output_dir / image_name
 
-    if bw:
-        quantized_image.save(output_filename, format="bmp")
-    else:
-        # save to buffer
-        buffer = BytesIO()
-        quantized_image.save(buffer, format="bmp")
-        buffer.seek(0)
+    # save to buffer
+    buffer = BytesIO()
+    quantized_image.save(buffer, format="bmp")
+    buffer.seek(0)
 
-        # Save output image
-        wand_image = WandImage(file=buffer, format="bmp")
-        wand_image.flop()
-        wand_image.type = "palette"
-        wand_image.save(filename=output_filename)
+    # Save output image
+    wand_image = WandImage(file=buffer, format="bmp")
+    wand_image.flop()
+    wand_image.type = "palette"
+    wand_image.save(filename=output_filename)
 
     print(f"Successfully converted {input_filename} to {output_filename}")
 
@@ -149,7 +148,8 @@ def main() -> None:
 
     args = parser.parse_args()
     input_filename = Path(args.image_file)
-    output_dir = Path("converted/")
+    bw_string = "_BW" if args.bw else ""
+    output_dir = Path(f"converted{bw_string}/")
 
     # Check whether the input file exists
     if not input_filename.exists():
@@ -158,17 +158,16 @@ def main() -> None:
 
     is_dir = input_filename.is_dir()
     print(f"{is_dir=}")
-    palette_blend_ratio = 1/3
     if is_dir:
         filelist = input_filename.glob("**/*.png")
         start = perf_counter()
         with ThreadPoolExecutor() as executor:
             for input_file in filelist:
-                arguments = (input_file, args.dir, args.mode, args.bw, output_dir, palette_blend_ratio, args.use_km)
+                arguments = (input_file, args.dir, args.mode, args.bw, output_dir, args.use_km)
                 executor.submit(convert, *arguments)
         print(f"Processing all images took {perf_counter()-start:.3f} seconds")
     else:
-        convert(input_filename, args.dir, args.mode, args.bw, output_dir, palette_blend_ratio, args.use_km)
+        convert(input_filename, args.dir, args.mode, args.bw, output_dir, args.use_km)
 
 
 if __name__ == "__main__":
