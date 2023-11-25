@@ -12,10 +12,8 @@ from typing import Collection, Literal
 from PIL import Image, ImageOps, ImageStat
 from wand.image import Image as WandImage
 
-from image_processor import ImageProcessor
-
 logger = logging.getLogger(__name__)
-IMAGE_PROCESSOR = ImageProcessor()
+IMAGE_PROCESSOR = None
 
 # available palettes
 OG_BW_PALETTE = (0, 0, 0, 255, 255, 255)
@@ -33,6 +31,7 @@ BW_PALETTE = LIMITED_BW_PALETTE
 SATURATED_PALETTE = FROM_PHOTO_PALETTE
 PALETTE_BLEND_RATIO = 1 / 3
 
+
 def split_palette(palette: Collection[int]) -> list[Collection[int]]:
     return [palette[x : x + 3] for x in range(0, len(palette), 3)]
 
@@ -45,9 +44,6 @@ def blend_palette(saturation: float) -> list[int]:
         rd, gd, bd = [c * (1 - saturation) for c in split_palette(OG_PALETTE)[i]]
         palette.extend((round(rs + rd), round(gs + gd), round(bs + bd)))
     return palette
-
-
-print(blend_palette(PALETTE_BLEND_RATIO))
 
 
 def get_target_size(
@@ -76,22 +72,27 @@ def convert(
 ) -> None:
     use_km = use_km if not bw else False
     input_image = Image.open(input_filename)
-    stats = ImageStat.Stat(input_image)
-    mean_brightness = mean(stats.mean)
-    image_is_dark = mean_brightness < 100
-    logger.debug(f"{mean_brightness=} {image_is_dark}")
     target_size = get_target_size(display_direction, input_image.size)
-    pad_color = (0, 0, 0) if image_is_dark else (255, 255, 255)
 
     if target_size == input_image.size:
         resized_image = input_image
     elif display_mode == "fit":
         resized_image = ImageOps.fit(input_image, target_size, method=Image.Resampling.LANCZOS)
     else:
+        stats = ImageStat.Stat(input_image)
+        mean_brightness = mean(stats.mean)
+        image_is_dark = mean_brightness < 100
+        logger.debug(f"{mean_brightness=} {image_is_dark}")
+        pad_color = (0, 0, 0) if image_is_dark else (255, 255, 255)
         resized_image = ImageOps.pad(input_image, target_size, method=Image.Resampling.LANCZOS, color=pad_color)
 
     # Create a palette object
     if use_km:
+        global IMAGE_PROCESSOR
+        if IMAGE_PROCESSOR is None:
+            from image_processor import ImageProcessor
+
+            IMAGE_PROCESSOR = ImageProcessor()
         IMAGE_PROCESSOR.diffuse_image(resized_image)
         quantized_image = resized_image
     else:
@@ -104,7 +105,6 @@ def convert(
         quantized_image = resized_image.quantize(palette=pal_image)
 
     # make filename
-    output_dir.mkdir(exist_ok=True)
     if use_km:
         extra_string = "_km"
     elif bw:
@@ -148,17 +148,17 @@ def main() -> None:
 
     args = parser.parse_args()
     input_filename = Path(args.image_file)
-    bw_string = "_BW" if args.bw else ""
-    output_dir = Path(f"converted{bw_string}/")
-
     # Check whether the input file exists
     if not input_filename.exists():
         print(f"Error: file {input_filename} does not exist")
         sys.exit(1)
 
-    is_dir = input_filename.is_dir()
-    print(f"{is_dir=}")
-    if is_dir:
+    bw_string = "_BW" if args.bw else ""
+    output_dir = Path(f"converted{bw_string}/")
+    output_dir.mkdir(exist_ok=True)
+
+    if is_dir := input_filename.is_dir():
+        print("Input is a directory")
         filelist = input_filename.glob("**/*.png")
         start = perf_counter()
         with ThreadPoolExecutor() as executor:
@@ -167,6 +167,7 @@ def main() -> None:
                 executor.submit(convert, *arguments)
         print(f"Processing all images took {perf_counter()-start:.3f} seconds")
     else:
+        print("Input is a single file")
         convert(input_filename, args.dir, args.mode, args.bw, output_dir, args.use_km)
 
 
