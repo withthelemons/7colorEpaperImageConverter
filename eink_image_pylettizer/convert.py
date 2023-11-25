@@ -70,7 +70,6 @@ def convert(
     output_dir: Path,
     use_km: bool,
 ) -> None:
-    use_km = use_km if not bw else False
     input_image = Image.open(input_filename)
     target_size = get_target_size(display_direction, input_image.size)
 
@@ -87,6 +86,7 @@ def convert(
         resized_image = ImageOps.pad(input_image, target_size, method=Image.Resampling.LANCZOS, color=pad_color)
 
     # Create a palette object
+    use_km = use_km if not bw else False
     if use_km:
         global IMAGE_PROCESSOR
         if IMAGE_PROCESSOR is None:
@@ -130,12 +130,14 @@ def convert(
 
 def main() -> None:
     # Create an ArgumentParser object
-    parser = argparse.ArgumentParser(description="Process some images.")
+    parser = argparse.ArgumentParser(
+        prog="python -m eink_image_pylettizer", description="Converts images to bmp format for 7 color eink displays"
+    )
 
     # Add orientation parameter
-    parser.add_argument("image_file", help="Input image file")
+    parser.add_argument("image_path", help="Path to image file or folder")
     parser.add_argument(
-        "--dir",
+        "--orientation",
         choices=["landscape", "portrait"],
         default="landscape",
         help="Image orientation (landscape or portrait)",
@@ -157,7 +159,7 @@ def main() -> None:
     output_dir = Path(f"converted{bw_string}/")
     output_dir.mkdir(exist_ok=True)
 
-    if is_dir := input_filename.is_dir():
+    if input_filename.is_dir():
         print("Input is a directory")
         filelist = input_filename.glob("**/*.png")
         start = perf_counter()

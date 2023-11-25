@@ -3,13 +3,14 @@
 # SPDX-License-Identifier: MIT
 # https://github.com/KodeMunkie/inky-impression-slideshow/blob/main/image_processor.py
 
-
+from __future__ import annotations
 import sys
-from typing import TypeAlias
+from typing import TypeAlias, TYPE_CHECKING
 
 from PIL.Image import Image
 
-from mypy_extensions import u8, i64
+if TYPE_CHECKING:
+    from mypy_extensions import u8, i64
 pixel_type: TypeAlias = tuple[u8, u8, u8]
 
 
