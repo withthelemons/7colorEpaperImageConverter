@@ -1,7 +1,9 @@
 import functools
 import logging
 import sys
+import os
 from concurrent.futures import ThreadPoolExecutor
+from itertools import chain
 from statistics import mean
 from time import perf_counter
 from io import BytesIO
@@ -11,6 +13,21 @@ from typing import Collection, Literal
 
 from PIL import Image, ImageOps, ImageStat
 from wand.image import Image as WandImage
+
+vipsbin = "C:/libvips/vips-dev-8.15/bin"
+os.environ["PATH"] = vipsbin + ";" + os.environ["PATH"]
+
+use_libvips = False
+try:
+    import pyvips
+    from pyvips.enums import Interesting
+except OSError as e:
+    print("Not using libvips")
+else:
+    major, minor, patch = pyvips.base.version(0), pyvips.base.version(1), pyvips.base.version(2)
+    print(f"Using libvips {major}.{minor}.{patch}")
+    use_libvips = True
+    del major, minor, patch
 
 logger = logging.getLogger(__name__)
 IMAGE_PROCESSOR = None
@@ -46,33 +63,21 @@ def blend_palette(saturation: float) -> list[int]:
     return palette
 
 
-def get_target_size(
-    display_direction: Literal["landscape", "portrait"] | None, input_image_size: tuple[int, int]
-) -> tuple[int, int]:
-    if display_direction:
-        if display_direction == "landscape":
-            target_size = 800, 480
-        else:
-            target_size = 480, 800
+def get_target_size(display_direction: Literal["landscape", "portrait"]) -> tuple[int, int]:
+    if display_direction == "landscape":
+        target_size = 800, 480
     else:
-        if input_image_size[0] < input_image_size[1]:
-            target_size = 480, 800
-        else:
-            target_size = 800, 480
+        target_size = 480, 800
     return target_size
 
 
-def convert(
+def pillow_resize(
     input_filename: Path,
-    display_direction: Literal["landscape", "portrait"] | None,
+    display_direction: Literal["landscape", "portrait"],
     display_mode: Literal["fit", "pad"],
-    bw: bool,
-    output_dir: Path,
-    use_km: bool,
-) -> None:
+) -> Image:
     input_image = Image.open(input_filename)
-    target_size = get_target_size(display_direction, input_image.size)
-
+    target_size = get_target_size(display_direction)
     if target_size == input_image.size:
         resized_image = input_image
     elif display_mode == "fit":
@@ -84,6 +89,53 @@ def convert(
         logger.debug(f"{mean_brightness=} {image_is_dark}")
         pad_color = (0, 0, 0) if image_is_dark else (255, 255, 255)
         resized_image = ImageOps.pad(input_image, target_size, method=Image.Resampling.LANCZOS, color=pad_color)
+    return resized_image
+
+
+def libvips_resize(
+    input_filename: Path,
+    display_direction: Literal["landscape", "portrait"],
+    display_mode: Literal["fit", "pad"],
+) -> Image:
+    filename = str(input_filename)
+    width, height = get_target_size(display_direction)
+    if display_mode == "fit":
+        image = pyvips.Image.thumbnail(filename, width, height=height, crop=Interesting.CENTRE, no_rotate=True)
+    else:
+        image = pyvips.Image.new_from_file(filename, access="sequential")
+        mean_brightness = image.avg()
+        image_is_dark = mean_brightness < 100
+        logger.debug(f"{mean_brightness=} {image_is_dark}")
+        pad_color = (0, 0, 0) if image_is_dark else (255, 255, 255)
+
+        image = pyvips.Image.thumbnail(filename, width, height=height, no_rotate=True)
+        image = image.gravity("centre", width, height, background=pad_color)
+
+    image.flatten()
+    data = image.write_to_memory()
+    return Image.frombytes(mode="RGB", size=(image.width, image.height), data=data)
+
+
+def convert(
+    input_filename: Path,
+    display_direction: Literal["landscape", "portrait"],
+    display_mode: Literal["fit", "pad"],
+    bw: bool,
+    output_dir: Path,
+    use_km: bool,
+    skip_existing: bool,
+) -> None:
+    start = perf_counter()
+    output_path = make_output_path(bw, display_mode, input_filename, output_dir, use_km)
+    if skip_existing and output_path.exists():
+        print(f"Skipping {output_path}")
+        return
+    if use_libvips:
+        resized_image = libvips_resize(input_filename, display_direction, display_mode)
+        print(f"libvips resize took {(perf_counter()-start)*1000:.3f} ms")
+    else:
+        resized_image = pillow_resize(input_filename, display_direction, display_mode)
+        print(f"pillow_resize resize took {(perf_counter()-start)*1000:.3f} ms")
 
     # Create a palette object
     use_km = use_km if not bw else False
@@ -104,16 +156,6 @@ def convert(
         pal_image.putpalette(palette)
         quantized_image = resized_image.quantize(palette=pal_image)
 
-    # make filename
-    if use_km:
-        extra_string = "_km"
-    elif bw:
-        extra_string = "_bw"
-    else:
-        extra_string = f"_{int(PALETTE_BLEND_RATIO * 100)}"
-    image_name = f"{input_filename.stem}_{display_mode}{extra_string}_converted.bmp"
-    output_filename = output_dir / image_name
-
     # save to buffer
     buffer = BytesIO()
     quantized_image.save(buffer, format="bmp")
@@ -123,9 +165,19 @@ def convert(
     wand_image = WandImage(file=buffer, format="bmp")
     wand_image.flop()
     wand_image.type = "palette"
-    wand_image.save(filename=output_filename)
+    wand_image.save(filename=output_path)
+    print(f"Successfully converted {input_filename} to {output_path}")
 
-    print(f"Successfully converted {input_filename} to {output_filename}")
+
+def make_output_path(bw: bool, display_mode: str, input_filename: Path, output_dir: Path, use_km: bool) -> Path:
+    if use_km:
+        extra_string = "_km"
+    elif bw:
+        extra_string = "_bw"
+    else:
+        extra_string = f"_{int(PALETTE_BLEND_RATIO * 100)}"
+    image_name = f"{input_filename.stem}_{display_mode}{extra_string}_converted.bmp"
+    return output_dir / image_name
 
 
 def main() -> None:
@@ -147,9 +199,14 @@ def main() -> None:
     parser.add_argument(
         "--use-km", action=argparse.BooleanOptionalAction, help="Use Kode Munkie's algorithm for dithering"
     )
+    parser.add_argument(
+        "--skip-existing",
+        action=argparse.BooleanOptionalAction,
+        help="Skip images that already exist in the target folder",
+    )
 
     args = parser.parse_args()
-    input_filename = Path(args.image_file)
+    input_filename = Path(args.image_path)
     # Check whether the input file exists
     if not input_filename.exists():
         print(f"Error: file {input_filename} does not exist")
@@ -161,16 +218,25 @@ def main() -> None:
 
     if input_filename.is_dir():
         print("Input is a directory")
-        filelist = input_filename.glob("**/*.png")
+        filelist_png = input_filename.glob("**/*.png")
+        filelist_jpg = input_filename.glob("**/*.jpg")
         start = perf_counter()
         with ThreadPoolExecutor() as executor:
-            for input_file in filelist:
-                arguments = (input_file, args.dir, args.mode, args.bw, output_dir, args.use_km)
+            for input_file in chain(filelist_png, filelist_jpg):
+                arguments = (
+                    input_file,
+                    args.orientation,
+                    args.mode,
+                    args.bw,
+                    output_dir,
+                    args.use_km,
+                    args.skip_existing,
+                )
                 executor.submit(convert, *arguments)
         print(f"Processing all images took {perf_counter()-start:.3f} seconds")
     else:
         print("Input is a single file")
-        convert(input_filename, args.dir, args.mode, args.bw, output_dir, args.use_km)
+        convert(input_filename, args.orientation, args.mode, args.bw, output_dir, args.use_km, args.skip_existing)
 
 
 if __name__ == "__main__":
